@@ -85,11 +85,12 @@ _termadvisor_prompt() {
     _ta_cmd="$(HISTTIMEFORMAT= history 1 2>/dev/null | sed 's/^ *[0-9]* *//')"
   fi
   case "$_ta_cmd" in
-    TermAdvisor*|termadvisor*) return $_ta_ec ;;
+    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return $_ta_ec ;;
     "") return $_ta_ec ;;
   esac
   if command -v TermAdvisor >/dev/null 2>&1; then
     TermAdvisor __hook --exit "$_ta_ec" --command "$_ta_cmd" --cwd "${TERMADVISOR_LAST_PWD:-$PWD}" --shell bash >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
   fi
   return $_ta_ec
 }
@@ -102,7 +103,7 @@ else
       return
     fi
     case "$BASH_COMMAND" in
-      _termadvisor_*|TermAdvisor*|termadvisor*) return ;;
+      _termadvisor_*|TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return ;;
     esac
     TERMADVISOR_LAST_CMD="$BASH_COMMAND"
     TERMADVISOR_LAST_PWD="$PWD"
@@ -117,6 +118,7 @@ fi
 '''
 
 _ZSH = r'''
+# Records the last command / exit code. Does not run suggested fixes.
 _termadvisor_preexec() {
   TERMADVISOR_LAST_CMD="$1"
   TERMADVISOR_LAST_PWD="$PWD"
@@ -125,11 +127,12 @@ _termadvisor_precmd() {
   local _ta_ec=$?
   local _ta_cmd="${TERMADVISOR_LAST_CMD:-}"
   case "$_ta_cmd" in
-    TermAdvisor*|termadvisor*) return ;;
+    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return ;;
     "") return ;;
   esac
   if command -v TermAdvisor >/dev/null 2>&1; then
     TermAdvisor __hook --exit "$_ta_ec" --command "$_ta_cmd" --cwd "${TERMADVISOR_LAST_PWD:-$PWD}" --shell zsh >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
   fi
 }
 autoload -Uz add-zsh-hook 2>/dev/null || true
@@ -138,6 +141,7 @@ add-zsh-hook precmd _termadvisor_precmd 2>/dev/null || true
 '''
 
 _FISH = r'''
+# Records the last command / exit code. Does not run suggested fixes.
 function _termadvisor_preexec --on-event fish_preexec
     set -g TERMADVISOR_LAST_CMD $argv
     set -g TERMADVISOR_LAST_PWD $PWD
@@ -149,7 +153,7 @@ function _termadvisor_postexec --on-event fish_postexec
         return
     end
     switch $_ta_cmd
-        case 'TermAdvisor*' 'termadvisor*'
+        case 'TermAdvisor*' 'termadvisor*' 'python3 -m termadvisor*' 'python -m termadvisor*'
             return
     end
     if command -q TermAdvisor
