@@ -227,6 +227,15 @@ def explain(
     if not event.command and not event.output:
         err.print("[red]Nothing to explain.[/red] Pipe a log, pass --file, or run a command after `TermAdvisor init`.")
         raise typer.Exit(2)
+    if event.exit_code == 0 and not force_model:
+        console.print(
+            f"Last command succeeded (exit 0): [cyan]{event.command or '(unknown)'}[/cyan]"
+        )
+        console.print(
+            "TermAdvisor explains failures. Use [cyan]ask[/cyan] if you still want commentary, "
+            "or [cyan]wrap[/cyan] to capture a log."
+        )
+        raise typer.Exit(0)
     _run_advice(cfg, event, offline=offline, force_model=force_model, no_interact=no_interact)
 
 

@@ -132,7 +132,7 @@ def interact(advice: Advice) -> None:
         return
     n = len(advice.suggestions)
     console.print(
-        f"[c] copy 1   [1-{n}] copy N   [e] more detail   [n] dismiss",
+        rf"\[c] copy 1   \[1-{n}] copy N   \[e] more detail   \[n] dismiss",
         style="dim",
     )
     try:
