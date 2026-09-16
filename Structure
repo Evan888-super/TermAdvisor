@@ -1,0 +1,6 @@
+models.py
+  → config.py + capture.py
+  → redact.py + context.py + trivial.py
+  → provider.py + advisor.py
+  → render.py
+  → hook.py + cli.py
