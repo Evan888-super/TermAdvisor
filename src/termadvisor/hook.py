@@ -1,10 +1,39 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 from pathlib import Path
 
+from termadvisor.config import AppConfig
+
 MARKER_BEGIN = "# >>> TermAdvisor hook >>>"
 MARKER_END = "# <<< TermAdvisor hook <<<"
+
+
+def command_ignored(command: str, patterns: list[str]) -> bool:
+    """True when the hook should not record this command."""
+    cmd = (command or "").strip()
+    if not cmd:
+        return True
+    first = cmd.split()[0]
+    for raw in patterns:
+        pat = (raw or "").strip()
+        if not pat:
+            continue
+        if any(ch in pat for ch in "*?["):
+            if fnmatch.fnmatch(cmd, pat) or fnmatch.fnmatch(first, pat):
+                return True
+        elif cmd == pat or first == pat or cmd.startswith(pat + " "):
+            return True
+    return False
+
+
+def should_record(cfg: AppConfig, command: str, exit_code: int) -> bool:
+    if command_ignored(command, cfg.hook.ignore):
+        return False
+    if cfg.hook.failures_only and exit_code == 0:
+        return False
+    return True
 
 
 def detect_shell() -> str:
@@ -12,6 +41,7 @@ def detect_shell() -> str:
     base = Path(name).name
     if base in {"bash", "zsh", "fish"}:
         return base
+    # fallback: parent process is unknown; prefer bash-compatible
     return base or "bash"
 
 
@@ -29,6 +59,7 @@ def rc_path_for(shell: str) -> Path:
         return Path(os.environ.get("ZDOTDIR", home)) / ".zshrc"
     if shell == "fish":
         return home / ".config" / "fish" / "config.fish"
+    # bash
     for name in (".bashrc", ".bash_profile"):
         path = home / name
         if path.exists():
@@ -80,12 +111,13 @@ _termadvisor_preexec() {
 }
 _termadvisor_prompt() {
   local _ta_ec=$?
+  # Preserve the user's exit status for other PROMPT_COMMAND hooks.
   local _ta_cmd="${TERMADVISOR_LAST_CMD:-}"
   if [[ -z "$_ta_cmd" ]]; then
     _ta_cmd="$(HISTTIMEFORMAT= history 1 2>/dev/null | sed 's/^ *[0-9]* *//')"
   fi
   case "$_ta_cmd" in
-    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return $_ta_ec ;;
+    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*|__systemd_osc_context*) return $_ta_ec ;;
     "") return $_ta_ec ;;
   esac
   if command -v TermAdvisor >/dev/null 2>&1; then
@@ -94,16 +126,18 @@ _termadvisor_prompt() {
   fi
   return $_ta_ec
 }
+# bash-preexec compatible if the user already has it
 if [[ -n "${bash_preexec_imported:-}" ]] || typeset -f preexec >/dev/null 2>&1; then
   preexec_functions+=(_termadvisor_preexec)
   precmd_functions+=(_termadvisor_prompt)
 else
+  # Lightweight DEBUG trap to snapshot the command line.
   _termadvisor_debug() {
     if [[ -n "$COMP_LINE" || -n "$READLINE_LINE" && "$BASH_COMMAND" == "$PROMPT_COMMAND" ]]; then
       return
     fi
     case "$BASH_COMMAND" in
-      _termadvisor_*|TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return ;;
+      _termadvisor_*|TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*|__systemd_osc_context*) return ;;
     esac
     TERMADVISOR_LAST_CMD="$BASH_COMMAND"
     TERMADVISOR_LAST_PWD="$PWD"
@@ -127,7 +161,7 @@ _termadvisor_precmd() {
   local _ta_ec=$?
   local _ta_cmd="${TERMADVISOR_LAST_CMD:-}"
   case "$_ta_cmd" in
-    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*) return ;;
+    TermAdvisor*|termadvisor*|python3\ -m\ termadvisor*|python\ -m\ termadvisor*|__systemd_osc_context*) return ;;
     "") return ;;
   esac
   if command -v TermAdvisor >/dev/null 2>&1; then
@@ -153,7 +187,7 @@ function _termadvisor_postexec --on-event fish_postexec
         return
     end
     switch $_ta_cmd
-        case 'TermAdvisor*' 'termadvisor*' 'python3 -m termadvisor*' 'python -m termadvisor*'
+        case 'TermAdvisor*' 'termadvisor*' 'python3 -m termadvisor*' 'python -m termadvisor*' '__systemd_osc_context*'
             return
     end
     if command -q TermAdvisor

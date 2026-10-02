@@ -1,7 +1,7 @@
 """Settings and on-disk paths.
 
-Layer 2a. Standard library only — does not import models.py —
-so login/status/config-set can work before any failure exists.
+Layer 2a. Depends on the standard library only — not on models.py —
+so login/status/config-set can work before any diagnosis exists.
 
 Default locations (XDG, overridable):
 
@@ -12,8 +12,6 @@ Default locations (XDG, overridable):
 
 The config file is written mode 0600 because it may contain an API key.
 """
-
-#puts the filled form in a drawer
 
 from __future__ import annotations
 
@@ -31,6 +29,19 @@ APP_NAME = "TermAdvisor"
 DEFAULT_BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 DEFAULT_API_KEY_ENV = "NEBIUS_API_KEY"
+
+DEFAULT_IGNORE: tuple[str, ...] = (
+    "TermAdvisor*",
+    "termadvisor*",
+    "python3 -m termadvisor*",
+    "python -m termadvisor*",
+    "__systemd_osc_context*",
+    "ls",
+    "ls *",
+    "cd",
+    "cd *",
+    "pwd",
+)
 
 MODEL_ALIASES = {
     "super": "nvidia/nemotron-3-super-120b-a12b",
@@ -54,6 +65,14 @@ SETTABLE: dict[str, tuple[str, str]] = {
     "snippet_radius": ("privacy", "snippet_radius"),
     "timeout_s": ("provider", "timeout_s"),
     "max_tokens": ("provider", "max_tokens"),
+    "failures_only": ("hook", "failures_only"),
+    "ignore": ("hook", "ignore"),
+    "cache_advice": ("behavior", "cache_advice"),
+    "cache_ttl_s": ("behavior", "cache_ttl_s"),
+    "search": ("tavily", "enabled"),
+    "tavily_key": ("tavily", "api_key"),
+    "tavily_key_env": ("tavily", "api_key_env"),
+    "tavily_max_results": ("tavily", "max_results"),
 }
 
 
@@ -97,6 +116,27 @@ class BehaviorConfig:
     capture_output: bool = False
     local_first: bool = True
     interactive: bool = True
+    cache_advice: bool = True
+    cache_ttl_s: int = 1800
+
+
+@dataclass
+class HookConfig:
+    """What the shell hook is allowed to record."""
+
+    failures_only: bool = True
+    ignore: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE))
+
+
+@dataclass
+class TavilyConfig:
+    """Optional web search. Off until the user stores a key and turns it on."""
+
+    enabled: bool = False
+    api_key: str = ""
+    api_key_env: str = "TAVILY_API_KEY"
+    max_results: int = 3
+    timeout_s: float = 20.0
 
 
 @dataclass
@@ -111,6 +151,8 @@ class AppConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    hook: HookConfig = field(default_factory=HookConfig)
+    tavily: TavilyConfig = field(default_factory=TavilyConfig)
 
     def resolved_model(self) -> str:
         raw = (self.provider.model or DEFAULT_MODEL).strip()
@@ -124,6 +166,14 @@ class AppConfig:
 
     def has_key(self) -> bool:
         return bool(self.resolved_api_key())
+
+    def resolved_tavily_key(self) -> str:
+        if self.tavily.api_key:
+            return self.tavily.api_key
+        return os.environ.get(self.tavily.api_key_env or "TAVILY_API_KEY", "")
+
+    def has_tavily_key(self) -> bool:
+        return bool(self.resolved_tavily_key())
 
 
 def _ensure_parent(path: Path) -> None:
@@ -139,7 +189,8 @@ def _bool(value: bool) -> str:
 
 
 def _dump_toml(cfg: AppConfig) -> str:
-    p, b, r = cfg.provider, cfg.behavior, cfg.privacy
+    p, b, r, h, t = cfg.provider, cfg.behavior, cfg.privacy, cfg.hook, cfg.tavily
+    ignore_lines = ",\n".join(f'  "{_escape(item)}"' for item in h.ignore)
     return "\n".join(
         [
             "[provider]",
@@ -158,11 +209,26 @@ def _dump_toml(cfg: AppConfig) -> str:
             f"capture_output = {_bool(b.capture_output)}",
             f"local_first = {_bool(b.local_first)}",
             f"interactive = {_bool(b.interactive)}",
+            f"cache_advice = {_bool(b.cache_advice)}",
+            f"cache_ttl_s = {int(b.cache_ttl_s)}",
             "",
             "[privacy]",
             f"upload_source_snippets = {_bool(r.upload_source_snippets)}",
             f"snippet_radius = {int(r.snippet_radius)}",
             f"max_snippet_files = {int(r.max_snippet_files)}",
+            "",
+            "[hook]",
+            f"failures_only = {_bool(h.failures_only)}",
+            "ignore = [",
+            ignore_lines,
+            "]",
+            "",
+            "[tavily]",
+            f"enabled = {_bool(t.enabled)}",
+            f'api_key_env = "{_escape(t.api_key_env)}"',
+            f'api_key = "{_escape(t.api_key)}"',
+            f"max_results = {int(t.max_results)}",
+            f"timeout_s = {float(t.timeout_s)}",
             "",
         ]
     )
@@ -173,6 +239,12 @@ def _merge(section: dict[str, Any], target: object) -> None:
         if not hasattr(target, key):
             continue
         current = getattr(target, key)
+        if isinstance(current, list):
+            if isinstance(val, str):
+                setattr(target, key, [part.strip() for part in val.split(",") if part.strip()])
+            elif isinstance(val, list):
+                setattr(target, key, [str(part) for part in val])
+            continue
         if isinstance(current, bool):
             setattr(target, key, bool(val))
         elif isinstance(current, int) and not isinstance(current, bool):
@@ -196,6 +268,10 @@ def load_config() -> AppConfig:
         _merge(data["behavior"], cfg.behavior)
     if "privacy" in data:
         _merge(data["privacy"], cfg.privacy)
+    if "hook" in data:
+        _merge(data["hook"], cfg.hook)
+    if "tavily" in data:
+        _merge(data["tavily"], cfg.tavily)
     return cfg
 
 
@@ -220,7 +296,9 @@ def set_value(cfg: AppConfig, key: str, value: str) -> AppConfig:
     section = getattr(cfg, section_name)
     current = getattr(section, field_name)
     parsed: Any = value
-    if isinstance(current, bool):
+    if isinstance(current, list):
+        parsed = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(current, bool):
         parsed = value.strip().lower() in {"1", "true", "yes", "on"}
     elif isinstance(current, int) and not isinstance(current, bool):
         parsed = int(value)
@@ -241,6 +319,9 @@ def as_public_dict(cfg: AppConfig) -> dict[str, Any]:
     key = data["provider"].get("api_key") or ""
     if key:
         data["provider"]["api_key"] = _mask(key)
+    tavily_key = (data.get("tavily") or {}).get("api_key") or ""
+    if tavily_key:
+        data["tavily"]["api_key"] = _mask(tavily_key)
     return data
 
 

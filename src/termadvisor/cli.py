@@ -13,7 +13,7 @@ from rich.table import Table
 
 from termadvisor import __version__
 from termadvisor.advisor import advise
-from termadvisor.capture import load_event, save_event
+from termadvisor.capture import load_event, read_session_tail, save_event, set_capture_flag
 from termadvisor.config import (
     AppConfig,
     as_public_dict,
@@ -22,9 +22,10 @@ from termadvisor.config import (
     save_config,
     set_value,
 )
-from termadvisor.hook import detect_shell, hook_snippet, install_hook, uninstall_hook
+from termadvisor.hook import detect_shell, hook_snippet, install_hook, should_record, uninstall_hook
 from termadvisor.models import FailureEvent
 from termadvisor.render import interact, show_card
+from termadvisor.search import search
 
 app = typer.Typer(
     add_completion=False,
@@ -123,6 +124,45 @@ def login(
     console.print("You can also export [cyan]NEBIUS_API_KEY[/cyan] instead of storing the key on disk.")
 
 
+@app.command("tavily-login")
+def tavily_login(
+    key: Optional[str] = typer.Option(None, "--key", help="Tavily API key (otherwise you will be prompted)"),
+) -> None:
+    """Store a Tavily key once. Search stays off until `TermAdvisor config set search=on`."""
+    cfg = _cfg()
+    if key is None:
+        console.print("Paste a Tavily key from https://tavily.com. It is stored like the Nebius key.")
+        try:
+            key = typer.prompt("Tavily API key", hide_input=True)
+        except typer.Abort:
+            raise typer.Exit(1)
+    key = (key or "").strip()
+    if not key:
+        err.print("[red]Empty key — nothing stored.[/red]")
+        raise typer.Exit(1)
+    cfg.tavily.api_key = key
+    path = save_config(cfg)
+    console.print(f"Saved Tavily key to [cyan]{path}[/cyan] (mode 0600). Search is still off.")
+    console.print("Turn it on with [cyan]TermAdvisor config set search=on[/cyan].")
+    console.print("You can also export [cyan]TAVILY_API_KEY[/cyan] instead of storing the key on disk.")
+
+
+@app.command("search")
+def search_cmd(
+    query: str = typer.Argument(..., help="Docs query. Does not call the model."),
+) -> None:
+    """Run one Tavily search and print the snippets. Needs a stored key."""
+    cfg = _cfg()
+    if not cfg.has_tavily_key():
+        err.print("[red]No Tavily key.[/red] Run [cyan]TermAdvisor tavily-login[/cyan] first.")
+        raise typer.Exit(2)
+    text = search(cfg, query)
+    if not text:
+        err.print("[red]Tavily returned nothing.[/red]")
+        raise typer.Exit(1)
+    console.print(text)
+
+
 @app.command()
 def init(
     shell: Optional[str] = typer.Option(None, "--shell", help="bash | zsh | fish (auto-detected)"),
@@ -199,6 +239,12 @@ def status(
     table.add_row("redact", "on" if cfg.behavior.redact else "off")
     table.add_row("local_first", "on" if cfg.behavior.local_first else "off")
     table.add_row("source snippets", "on" if cfg.privacy.upload_source_snippets else "off")
+    table.add_row("failures only", "on" if cfg.hook.failures_only else "off")
+    table.add_row("capture output", "on" if cfg.behavior.capture_output else "off")
+    table.add_row("advice cache", "on" if cfg.behavior.cache_advice else "off")
+    table.add_row("cache ttl", f"{cfg.behavior.cache_ttl_s}s")
+    table.add_row("tavily search", "on" if cfg.tavily.enabled else "off")
+    table.add_row("tavily key", "yes" if cfg.has_tavily_key() else "no")
     event = load_event()
     if event:
         table.add_row("last command", event.command or "(empty)")
@@ -215,6 +261,8 @@ def explain(
     offline: bool = typer.Option(False, "--offline", help="Only use local rules; never call the model"),
     force_model: bool = typer.Option(False, "--model-only", help="Skip local trivial routing"),
     no_interact: bool = typer.Option(False, "--no-interact", help="Print the card and exit"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Do not read or write the advice cache"),
+    use_search: bool = typer.Option(False, "--search", help="Attach Tavily snippets before the model call"),
 ) -> None:
     """Explain the last failure, a piped log, or a log file."""
     cfg = _cfg()
@@ -236,7 +284,15 @@ def explain(
             "or [cyan]wrap[/cyan] to capture a log."
         )
         raise typer.Exit(0)
-    _run_advice(cfg, event, offline=offline, force_model=force_model, no_interact=no_interact)
+    _run_advice(
+        cfg,
+        event,
+        offline=offline,
+        force_model=force_model,
+        no_interact=no_interact,
+        use_cache=not no_cache,
+        use_search=True if use_search else None,
+    )
 
 
 @app.command()
@@ -246,6 +302,7 @@ def ask(
     exit_code: Optional[int] = typer.Option(None, "--exit", "-x"),
     offline: bool = typer.Option(False, "--offline"),
     no_interact: bool = typer.Option(False, "--no-interact"),
+    no_cache: bool = typer.Option(False, "--no-cache"),
 ) -> None:
     """Ask a question. Uses the last recorded failure as context when present."""
     cfg = _cfg()
@@ -261,6 +318,7 @@ def ask(
         offline=offline,
         force_model=True,
         no_interact=no_interact,
+        use_cache=not no_cache,
     )
 
 
@@ -371,6 +429,35 @@ def config_set(
     console.print(f"Set [cyan]{key}[/cyan] = [cyan]{value}[/cyan]")
 
 
+@app.command("capture")
+def capture_cmd(
+    state: str = typer.Argument(..., help="on or off"),
+) -> None:
+    """Opt in to attaching a script(1) session log on the next hook event."""
+    cfg = _cfg()
+    enabled = state.strip().lower() in {"1", "on", "true", "yes"}
+    if state.strip().lower() not in {"1", "on", "true", "yes", "0", "off", "false", "no"}:
+        err.print("Use [cyan]TermAdvisor capture on[/cyan] or [cyan]TermAdvisor capture off[/cyan].")
+        raise typer.Exit(2)
+    cfg.behavior.capture_output = enabled
+    save_config(cfg)
+    set_capture_flag(enabled)
+    if not enabled:
+        console.print("Output capture [yellow]off[/yellow]. The hook stores command, exit, and folder only.")
+        return
+    log = session_log_hint()
+    console.print("Output capture [green]on[/green].")
+    console.print("Start a recorded shell so the hook can see the log:")
+    console.print(f"  [cyan]script -q -f {log}[/cyan]")
+    console.print("Leave that shell with [cyan]exit[/cyan]. Capture stays off until you do this.")
+
+
+def session_log_hint() -> str:
+    from termadvisor.capture import session_log_path
+
+    return str(session_log_path())
+
+
 @app.command("__hook", hidden=True)
 def hook_entry(
     exit_code: int = typer.Option(..., "--exit"),
@@ -378,10 +465,13 @@ def hook_entry(
     cwd: str = typer.Option("", "--cwd"),
     shell: str = typer.Option("", "--shell"),
 ) -> None:
-    """Called from the shell hook. Records the event; advises only when watch is on and the command failed."""
+    """Called from the shell hook. Records failures; advises only when watch is on."""
     cfg = _cfg()
-    existing = load_event()
-    output = existing.output if existing and existing.command == command else ""
+    if not should_record(cfg, command, exit_code):
+        raise typer.Exit(0)
+    output = ""
+    if cfg.behavior.capture_output:
+        output = read_session_tail(cfg.behavior.max_tail_lines)
     event = FailureEvent(
         command=command,
         exit_code=exit_code,
@@ -396,7 +486,7 @@ def hook_entry(
         raise typer.Exit(0)
     try:
         advice = advise(cfg, event)
-    except Exception as exc:
+    except Exception as exc:  # hook must never break the user's prompt
         err.print(f"[dim]TermAdvisor skipped: {exc}[/dim]")
         raise typer.Exit(0)
     show_card(advice)
@@ -411,6 +501,8 @@ def _run_advice(
     offline: bool = False,
     force_model: bool = False,
     no_interact: bool = False,
+    use_cache: bool = True,
+    use_search: bool | None = None,
 ) -> None:
     save_event(event)
     try:
@@ -420,6 +512,8 @@ def _run_advice(
             question=question,
             force_model=force_model,
             offline=offline,
+            use_cache=use_cache,
+            use_search=use_search,
         )
     except Exception as exc:
         err.print(f"[red]TermAdvisor could not get advice:[/red] {exc}")
