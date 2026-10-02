@@ -218,6 +218,34 @@ PYTHONPATH=src python3 -m pytest -q
 
 ## Troubleshooting
 
+**`No module named termadvisor`**
+
+The alias ran, but Python cannot see `src/`. This happens from `/` or any folder when `PYTHONPATH` is unset. Put the path in the alias:
+
+```bash
+alias TermAdvisor="PYTHONPATH=\"$HOME/TermAdvisor/src\" python3 -m termadvisor"
+```
+
+Add that to `~/.bashrc`, delete any older `alias TermAdvisor=` line, then `source ~/.bashrc`. From `/`, `TermAdvisor status` should print the table.
+
+An editable install avoids `PYTHONPATH`:
+
+```bash
+cd ~/TermAdvisor
+python3 -m pip install --user -e .
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+**`No module named termadvisor`**
+
+The alias ran `python3 -m termadvisor` without this tree on `PYTHONPATH`. That happens from `/` if `~/.bashrc` was not sourced, or if `PYTHONPATH` only exists inside `~/TermAdvisor`. Put the path on the alias:
+
+```bash
+alias TermAdvisor="PYTHONPATH=\"$HOME/TermAdvisor/src\" python3 -m termadvisor"
+```
+
+Then `source ~/.bashrc` and run `TermAdvisor status` from `/`. An editable install avoids `PYTHONPATH` entirely: `python3 -m pip install --user -e .` from the repo, with `~/.local/bin` on `PATH`.
+
 **`No such command 'tavily-login'`**
 
 The alias is running an old checkout. `type TermAdvisor` and `echo $PYTHONPATH` must point at the tree whose `--help` lists `tavily-login`. Update `PYTHONPATH` to `$HOME/TermAdvisor/src` and `source ~/.bashrc`.
