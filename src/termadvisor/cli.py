@@ -334,7 +334,22 @@ def wrap(
     if not args:
         raise typer.Exit(2)
     cfg = _cfg()
-    proc = subprocess.run(args, text=True, capture_output=True)
+    try:
+        proc = subprocess.run(args, text=True, capture_output=True)
+    except FileNotFoundError:
+        missing = args[0]
+        message = f"bash: {missing}: command not found\n"
+        sys.stderr.write(message)
+        event = FailureEvent(
+            command=" ".join(args),
+            exit_code=127,
+            cwd=os.getcwd(),
+            output=message,
+            shell="wrap",
+        )
+        save_event(event)
+        _run_advice(cfg, event, offline=offline, no_interact=no_interact)
+        raise typer.Exit(127)
     combined = ""
     if proc.stdout:
         sys.stdout.write(proc.stdout)
